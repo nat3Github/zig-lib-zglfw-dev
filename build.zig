@@ -59,7 +59,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(glfw);
     glfw.installHeadersDirectory(b.path("libs/glfw/include"), "", .{});
 
-    addIncludePaths(b, glfw.root_module, target, options);
+    addIncludePaths(b, glfw.root_module);
     linkSystemLibs(b, glfw, target, options);
 
     const src_dir = "libs/glfw/src/";
@@ -181,7 +181,7 @@ pub fn build(b: *std.Build) void {
         },
         else => {},
     }
-    addIncludePaths(b, module, target, options);
+    addIncludePaths(b, module);
 
     const test_step = b.step("test", "Run zglfw tests");
     const tests = b.addTest(.{
@@ -192,7 +192,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    addIncludePaths(b, tests.root_module, target, options);
+    addIncludePaths(b, tests.root_module);
     linkSystemLibs(b, tests, target, options);
     tests.root_module.addImport("zglfw_options", options_module);
     tests.root_module.linkLibrary(glfw);
@@ -200,19 +200,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
-fn addIncludePaths(b: *std.Build, unit: anytype, target: std.Build.ResolvedTarget, options: anytype) void {
+fn addIncludePaths(b: *std.Build, unit: anytype) void {
     unit.addIncludePath(b.path("libs/glfw/include"));
-    switch (target.result.os.tag) {
-        .linux => {
-            if (b.lazyDependency("system_sdk", .{})) |system_sdk| {
-                unit.addSystemIncludePath(system_sdk.path("linux/include"));
-                if (options.enable_wayland) {
-                    unit.addSystemIncludePath(system_sdk.path("linux/include/wayland"));
-                }
-            }
-        },
-        else => {},
-    }
 }
 
 fn linkSystemLibs(b: *std.Build, compile_step: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, options: anytype) void {
@@ -224,10 +213,10 @@ fn linkSystemLibs(b: *std.Build, compile_step: *std.Build.Step.Compile, target: 
             compile_step.root_module.linkSystemLibrary("shell32", .{});
         },
         .macos => {
-            if (b.lazyDependency("system_sdk", .{})) |system_sdk| {
-                compile_step.root_module.addFrameworkPath(system_sdk.path("macos12/System/Library/Frameworks"));
-                compile_step.root_module.addSystemIncludePath(system_sdk.path("macos12/usr/include"));
-                compile_step.root_module.addLibraryPath(system_sdk.path("macos12/usr/lib"));
+            if (b.sysroot) |sysroot| {
+                compile_step.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+                compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
+                compile_step.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/lib" }) });
             }
             compile_step.root_module.linkSystemLibrary("objc", .{});
             compile_step.root_module.linkFramework("IOKit", .{});
@@ -239,15 +228,6 @@ fn linkSystemLibs(b: *std.Build, compile_step: *std.Build.Step.Compile, target: 
             compile_step.root_module.linkFramework("Foundation", .{});
         },
         .linux => {
-            if (b.lazyDependency("system_sdk", .{})) |system_sdk| {
-                if (target.result.cpu.arch.isX86()) {
-                    compile_step.root_module.addLibraryPath(system_sdk.path("linux/lib/x86_64-linux-gnu"));
-                } else {
-                    compile_step.root_module.addLibraryPath(system_sdk.path("linux/lib/aarch64-linux-gnu"));
-                }
-                compile_step.root_module.addSystemIncludePath(system_sdk.path("linux/include"));
-                compile_step.root_module.addSystemIncludePath(system_sdk.path("linux/include/wayland"));
-            }
             if (options.enable_x11) {
                 compile_step.root_module.addCMacro("_GLFW_X11", "1");
                 compile_step.root_module.linkSystemLibrary("X11", .{});
