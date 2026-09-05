@@ -216,7 +216,17 @@ fn linkSystemLibs(b: *std.Build, compile_step: *std.Build.Step.Compile, target: 
             if (b.sysroot) |sysroot| {
                 compile_step.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
                 compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
-                compile_step.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/lib" }) });
+                // Zig strips the leading "/" off an absolute -L path and rejoins it onto
+                // --sysroot itself, so this must be given as if the sysroot were "/".
+                compile_step.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+            } else if (b.graph.host.result.os.tag != .macos) {
+                std.debug.print(
+                    "error: cross-compiling to macOS requires --sysroot pointing at a macOS SDK " ++
+                        "(e.g. --sysroot /path/to/MacOSX.sdk), otherwise linking frameworks will fail deep " ++
+                        "in the linker with an unhelpful 'unable to find framework' error.\n",
+                    .{},
+                );
+                std.process.exit(1);
             }
             compile_step.root_module.linkSystemLibrary("objc", .{});
             compile_step.root_module.linkFramework("IOKit", .{});
