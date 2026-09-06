@@ -1,4 +1,33 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+// Cross-compiling to Linux from a non-Linux host: the host's pkg-config (e.g.
+// Homebrew's on macOS) resolves X11 to host-arch libs, and X11/wl_platform.h headers
+// aren't found at all. These come from plain absolute -Dsystem_include_path/
+// -Dlibrary_path options (NOT --sysroot): a global --sysroot also applies to native
+// host-tool compiles elsewhere in the build graph and breaks those (e.g. "unable to
+// find libSystem system library"), so headers/libs are supplied directly instead.
+// b.option is read once (memoized) since addLinuxSysroot is called multiple times
+// per build (glfw lib + zglfw test exe) and b.option panics on re-registration.
+var linux_cross_paths_cache: ?struct { include_path: ?std.Build.LazyPath, library_path: ?std.Build.LazyPath } = null;
+
+fn addLinuxSysroot(b: *std.Build, mod: *std.Build.Module) std.Build.Module.SystemLib.UsePkgConfig {
+    if (builtin.os.tag == .linux) return .yes;
+    if (linux_cross_paths_cache == null) {
+        linux_cross_paths_cache = .{
+            .include_path = b.option(std.Build.LazyPath, "system_include_path", "Linux sysroot include path (for cross-compiling to Linux)"),
+            .library_path = b.option(std.Build.LazyPath, "library_path", "Linux sysroot library path (for cross-compiling to Linux)"),
+        };
+    }
+    const paths = linux_cross_paths_cache.?;
+    if (paths.include_path) |p| mod.addSystemIncludePath(p);
+    if (paths.library_path) |p| mod.addLibraryPath(p);
+    if (paths.include_path == null or paths.library_path == null) {
+        std.debug.print("error: cross-compiling to Linux requires -Dsystem_include_path and -Dlibrary_path pointing at a Linux sysroot's usr/include and usr/lib (X11/wayland headers+libs)\n", .{});
+        std.process.exit(1);
+    }
+    return .no;
+}
 
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
@@ -153,6 +182,9 @@ pub fn build(b: *std.Build) void {
                     .flags = &.{},
                 });
             }
+            if (options.enable_x11 or options.enable_wayland) {
+                _ = addLinuxSysroot(b, glfw.root_module);
+            }
             if (options.enable_x11) {
                 glfw.root_module.addCSourceFiles(.{
                     .files = &.{
@@ -164,7 +196,9 @@ pub fn build(b: *std.Build) void {
                     .flags = &.{},
                 });
                 glfw.root_module.addCMacro("_GLFW_X11", "1");
-                glfw.root_module.linkSystemLibrary("X11", .{});
+                glfw.root_module.linkSystemLibrary("X11", .{
+                    .use_pkg_config = if (builtin.os.tag == .linux) .yes else .no,
+                });
             }
             if (options.enable_wayland) {
                 glfw.root_module.addCSourceFiles(.{
@@ -238,9 +272,14 @@ fn linkSystemLibs(b: *std.Build, compile_step: *std.Build.Step.Compile, target: 
             compile_step.root_module.linkFramework("Foundation", .{});
         },
         .linux => {
+            if (options.enable_x11 or options.enable_wayland) {
+                _ = addLinuxSysroot(b, compile_step.root_module);
+            }
             if (options.enable_x11) {
                 compile_step.root_module.addCMacro("_GLFW_X11", "1");
-                compile_step.root_module.linkSystemLibrary("X11", .{});
+                compile_step.root_module.linkSystemLibrary("X11", .{
+                    .use_pkg_config = if (builtin.os.tag == .linux) .yes else .no,
+                });
             }
             if (options.enable_wayland) {
                 compile_step.root_module.addCMacro("_GLFW_WAYLAND", "1");
