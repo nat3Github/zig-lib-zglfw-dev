@@ -1,35 +1,59 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-// Cross-compiling to Linux from a non-Linux host: the host's pkg-config (e.g.
-// Homebrew's on macOS) resolves X11 to host-arch libs, and X11/wl_platform.h headers
-// aren't found at all. These come from plain absolute -Dsystem_include_path/
-// -Dlibrary_path options (NOT --sysroot): a global --sysroot also applies to native
-// host-tool compiles elsewhere in the build graph and breaks those (e.g. "unable to
-// find libSystem system library"), so headers/libs are supplied directly instead.
-// b.option is read once (memoized) since addLinuxSysroot is called multiple times
-// per build (glfw lib + zglfw test exe) and b.option panics on re-registration.
-var linux_cross_paths_cache: ?struct { include_path: ?std.Build.LazyPath, library_path: ?std.Build.LazyPath } = null;
+// Cross-compile system paths, passed explicitly rather than via --sysroot or
+// --search-prefix: both of those are graph-wide, so they also hit native host-tool
+// steps in the same build graph (breaking those with e.g. "unable to find libSystem
+// system library"), --sysroot additionally re-roots every absolute -L onto itself,
+// and --search-prefix never reaches translate-c.
+// Options are registered unconditionally in build() (b.option panics on
+// re-registration, and a dependent passing -Dsystem_include_path on a target that
+// didn't read it would otherwise hit "invalid option").
+var cross_paths: struct {
+    include_path: ?std.Build.LazyPath,
+    framework_path: ?std.Build.LazyPath,
+    library_path: ?std.Build.LazyPath,
+} = .{ .include_path = null, .framework_path = null, .library_path = null };
 
-fn addLinuxSysroot(b: *std.Build, mod: *std.Build.Module) std.Build.Module.SystemLib.UsePkgConfig {
+/// Returns whether the host's pkg-config may be consulted: cross-compiling to Linux
+/// from a non-Linux host, it resolves X11 to host-arch libs, so it must not be.
+fn addLinuxCrossPaths(mod: *std.Build.Module) std.Build.Module.SystemLib.UsePkgConfig {
     if (builtin.os.tag == .linux) return .yes;
-    if (linux_cross_paths_cache == null) {
-        linux_cross_paths_cache = .{
-            .include_path = b.option(std.Build.LazyPath, "system_include_path", "Linux sysroot include path (for cross-compiling to Linux)"),
-            .library_path = b.option(std.Build.LazyPath, "library_path", "Linux sysroot library path (for cross-compiling to Linux)"),
-        };
-    }
-    const paths = linux_cross_paths_cache.?;
-    if (paths.include_path) |p| mod.addSystemIncludePath(p);
-    if (paths.library_path) |p| mod.addLibraryPath(p);
-    if (paths.include_path == null or paths.library_path == null) {
+    if (cross_paths.include_path) |p| mod.addSystemIncludePath(p);
+    if (cross_paths.library_path) |p| mod.addLibraryPath(p);
+    if (cross_paths.include_path == null or cross_paths.library_path == null) {
         std.debug.print("error: cross-compiling to Linux requires -Dsystem_include_path and -Dlibrary_path pointing at a Linux sysroot's usr/include and usr/lib (X11/wayland headers+libs)\n", .{});
         std.process.exit(1);
     }
     return .no;
 }
 
+fn addMacosCrossPaths(mod: *std.Build.Module) void {
+    // Native macOS builds need nothing here: clang locates the system SDK itself.
+    if (cross_paths.include_path) |p| mod.addSystemIncludePath(p);
+    if (cross_paths.framework_path) |p| mod.addSystemFrameworkPath(p);
+    if (cross_paths.library_path) |p| mod.addLibraryPath(p);
+    if (builtin.os.tag != .macos and
+        (cross_paths.include_path == null or cross_paths.framework_path == null or cross_paths.library_path == null))
+    {
+        std.debug.print(
+            "error: cross-compiling to macOS requires -Dsystem_include_path, -Dsystem_framework_path and " ++
+                "-Dlibrary_path pointing at a macOS SDK's usr/include, System/Library/Frameworks and usr/lib, " ++
+                "otherwise linking frameworks fails deep in the linker with an unhelpful " ++
+                "'unable to find framework' error.\n",
+            .{},
+        );
+        std.process.exit(1);
+    }
+}
+
 pub fn build(b: *std.Build) void {
+    cross_paths = .{
+        .include_path = b.option(std.Build.LazyPath, "system_include_path", "Target system include path (for cross-compiling)"),
+        .framework_path = b.option(std.Build.LazyPath, "system_framework_path", "Target system framework path (for cross-compiling to macOS)"),
+        .library_path = b.option(std.Build.LazyPath, "library_path", "Target system library path (for cross-compiling)"),
+    };
+
     const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
 
@@ -89,7 +113,7 @@ pub fn build(b: *std.Build) void {
     glfw.installHeadersDirectory(b.path("libs/glfw/include"), "", .{});
 
     addIncludePaths(b, glfw.root_module);
-    linkSystemLibs(b, glfw, target, options);
+    linkSystemLibs(glfw, target, options);
 
     const src_dir = "libs/glfw/src/";
     switch (target.result.os.tag) {
@@ -183,7 +207,7 @@ pub fn build(b: *std.Build) void {
                 });
             }
             if (options.enable_x11 or options.enable_wayland) {
-                _ = addLinuxSysroot(b, glfw.root_module);
+                _ = addLinuxCrossPaths(glfw.root_module);
             }
             if (options.enable_x11) {
                 glfw.root_module.addCSourceFiles(.{
@@ -227,7 +251,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     addIncludePaths(b, tests.root_module);
-    linkSystemLibs(b, tests, target, options);
+    linkSystemLibs(tests, target, options);
     tests.root_module.addImport("zglfw_options", options_module);
     tests.root_module.linkLibrary(glfw);
     b.installArtifact(tests);
@@ -238,7 +262,7 @@ fn addIncludePaths(b: *std.Build, unit: anytype) void {
     unit.addIncludePath(b.path("libs/glfw/include"));
 }
 
-fn linkSystemLibs(b: *std.Build, compile_step: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, options: anytype) void {
+fn linkSystemLibs(compile_step: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, options: anytype) void {
     compile_step.root_module.link_libc = true;
     switch (target.result.os.tag) {
         .windows => {
@@ -247,21 +271,7 @@ fn linkSystemLibs(b: *std.Build, compile_step: *std.Build.Step.Compile, target: 
             compile_step.root_module.linkSystemLibrary("shell32", .{});
         },
         .macos => {
-            if (b.sysroot) |sysroot| {
-                compile_step.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
-                compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
-                // Zig strips the leading "/" off an absolute -L path and rejoins it onto
-                // --sysroot itself, so this must be given as if the sysroot were "/".
-                compile_step.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-            } else if (b.graph.host.result.os.tag != .macos) {
-                std.debug.print(
-                    "error: cross-compiling to macOS requires --sysroot pointing at a macOS SDK " ++
-                        "(e.g. --sysroot /path/to/MacOSX.sdk), otherwise linking frameworks will fail deep " ++
-                        "in the linker with an unhelpful 'unable to find framework' error.\n",
-                    .{},
-                );
-                std.process.exit(1);
-            }
+            addMacosCrossPaths(compile_step.root_module);
             compile_step.root_module.linkSystemLibrary("objc", .{});
             compile_step.root_module.linkFramework("IOKit", .{});
             compile_step.root_module.linkFramework("CoreFoundation", .{});
@@ -273,7 +283,7 @@ fn linkSystemLibs(b: *std.Build, compile_step: *std.Build.Step.Compile, target: 
         },
         .linux => {
             if (options.enable_x11 or options.enable_wayland) {
-                _ = addLinuxSysroot(b, compile_step.root_module);
+                _ = addLinuxCrossPaths(compile_step.root_module);
             }
             if (options.enable_x11) {
                 compile_step.root_module.addCMacro("_GLFW_X11", "1");
