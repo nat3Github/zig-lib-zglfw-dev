@@ -7,7 +7,7 @@ const builtin = @import("builtin");
 // system library"), --sysroot additionally re-roots every absolute -L onto itself,
 // and --search-prefix never reaches translate-c.
 // Options are registered unconditionally in build() (b.option panics on
-// re-registration, and a dependent passing -Dsystem_include_path on a target that
+// re-registration, and a dependent passing -Dinclude_path on a target that
 // didn't read it would otherwise hit "invalid option").
 var cross_paths: struct {
     include_path: ?std.Build.LazyPath,
@@ -22,7 +22,7 @@ fn addLinuxCrossPaths(mod: *std.Build.Module) std.Build.Module.SystemLib.UsePkgC
     if (cross_paths.include_path) |p| mod.addSystemIncludePath(p);
     if (cross_paths.library_path) |p| mod.addLibraryPath(p);
     if (cross_paths.include_path == null or cross_paths.library_path == null) {
-        std.debug.print("error: cross-compiling to Linux requires -Dsystem_include_path and -Dlibrary_path pointing at a Linux sysroot's usr/include and usr/lib (X11/wayland headers+libs)\n", .{});
+        std.debug.print("error: cross-compiling to Linux requires -Dinclude_path and -Dlibrary_path pointing at a Linux sysroot's usr/include and usr/lib (X11/wayland headers+libs)\n", .{});
         std.process.exit(1);
     }
     return .no;
@@ -37,7 +37,7 @@ fn addMacosCrossPaths(mod: *std.Build.Module) void {
         (cross_paths.include_path == null or cross_paths.framework_path == null or cross_paths.library_path == null))
     {
         std.debug.print(
-            "error: cross-compiling to macOS requires -Dsystem_include_path, -Dsystem_framework_path and " ++
+            "error: cross-compiling to macOS requires -Dinclude_path, -Dframework_path and " ++
                 "-Dlibrary_path pointing at a macOS SDK's usr/include, System/Library/Frameworks and usr/lib, " ++
                 "otherwise linking frameworks fails deep in the linker with an unhelpful " ++
                 "'unable to find framework' error.\n",
@@ -49,8 +49,8 @@ fn addMacosCrossPaths(mod: *std.Build.Module) void {
 
 pub fn build(b: *std.Build) void {
     cross_paths = .{
-        .include_path = b.option(std.Build.LazyPath, "system_include_path", "Target system include path (for cross-compiling)"),
-        .framework_path = b.option(std.Build.LazyPath, "system_framework_path", "Target system framework path (for cross-compiling to macOS)"),
+        .include_path = b.option(std.Build.LazyPath, "include_path", "Target system include path (for cross-compiling)"),
+        .framework_path = b.option(std.Build.LazyPath, "framework_path", "Target system framework path (for cross-compiling to macOS)"),
         .library_path = b.option(std.Build.LazyPath, "library_path", "Target system library path (for cross-compiling)"),
     };
 
